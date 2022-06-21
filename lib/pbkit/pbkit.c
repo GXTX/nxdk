@@ -59,8 +59,6 @@
 
 #define MAX_EXTRA_BUFFERS               8
 
-#define MAXRAM                      0x03FFAFFF
-
 #define NONE                        -1
 
 #define TICKSTIMEOUT                    100 //if Dma doesn't react in that time, send a warning
@@ -101,6 +99,9 @@ static  KINTERRUPT      pb_InterruptObject;
 static  KDPC            pb_DPCObject;
 
 static  HANDLE          pb_VBlankEvent;
+
+static  DWORD           pb_MaxRAM;
+static  DWORD           pb_MemoryTop;
 
 static  DWORD           pb_OldMCEnable;
 static  DWORD           pb_OldMCInterrupt;
@@ -1035,7 +1036,7 @@ static BOOLEAN __stdcall ISR(PKINTERRUPT Interrupt, PVOID ServiceContext)
     {
         //Need to show next back buffer to show up? (do it now, it's urgent)
         if (pb_debug_screen_active==0)
-        if (pb_BackBufferbReady[pb_BackBufferNxtVBL]==1) VIDEOREG(PCRTC_START)=pb_FBAddr[pb_BackBufferIndex[pb_BackBufferNxtVBL]]&0x03FFFFFF;
+        if (pb_BackBufferbReady[pb_BackBufferNxtVBL]==1) VIDEOREG(PCRTC_START)=pb_FBAddr[pb_BackBufferIndex[pb_BackBufferNxtVBL]]&pb_MaxRAM;
     }
 
     VIDEOREG(NV_PMC_INTR_EN_0)=NV_PMC_INTR_EN_0_INTA_DISABLED;
@@ -1365,7 +1366,7 @@ static void pb_create_dma_ctx(  DWORD ChannelID,
     }
     else
     {
-        Addr=Base&0x03FFFFFF;
+        Addr=Base&pb_MaxRAM;
         AddrSpace=ADDR_SYSMEM;
     }
 
@@ -1380,7 +1381,7 @@ static void pb_create_dma_ctx(  DWORD ChannelID,
     VIDEOREG(NV_PRAMIN+(Inst<<4)+0x08)=Addr|3;  //0x00000003|Addr
     VIDEOREG(NV_PRAMIN+(Inst<<4)+0x0C)=Addr|3;  //0x00000003|Addr
     VIDEOREG(NV_PRAMIN+(Inst<<4)+0x00)=dma_flags;   //0x???sB0cl ???=Addr&0xFFF
-    VIDEOREG(NV_PRAMIN+(Inst<<4)+0x04)=Limit;   //0x03FFAFFF (MAXRAM)
+    VIDEOREG(NV_PRAMIN+(Inst<<4)+0x04)=Limit;   //0x03FFAFFF ,pb_MemoryTop)
 
     memset(pDmaObject,0,sizeof(struct s_CtxDma));
 
@@ -1698,7 +1699,7 @@ static void pb_start(void)
         //asks push buffer Dma engine to detect incoming Dma data (written at pb_Put)
 
         pb_cache_flush();
-        *(pb_DmaUserAddr+0x40/4)=((DWORD)pb_Put)&0x03FFFFFF;
+        *(pb_DmaUserAddr+0x40/4)=((DWORD)pb_Put)&pb_MaxRAM;
         //from now any write will be detected
 
 #ifdef DBG
@@ -1898,7 +1899,7 @@ static void set_draw_buffer(DWORD buffer_addr)
         //DMA channel 10 is used by GPU in order to render depth stencil
         if (depth_stencil)
         {
-            dma_addr=pb_DSAddr&0x03FFFFFF;
+            dma_addr=pb_DSAddr&pb_MaxRAM;
             dma_limit=height*pitch_depth_stencil-1; //(last byte)
             dma_flags=DMA_CLASS_3D|0x0000B000;
             dma_addr|=3;
@@ -1947,7 +1948,7 @@ static void set_draw_buffer(DWORD buffer_addr)
 
 void pb_target_back_buffer(void)
 {
-    set_draw_buffer(pb_FBAddr[pb_back_index]&0x03FFFFFF);
+    set_draw_buffer(pb_FBAddr[pb_back_index]&pb_MaxRAM);
 }
 
 void pb_target_extra_buffer(int buffer_index)
@@ -1958,7 +1959,7 @@ void pb_target_extra_buffer(int buffer_index)
         return;
     }
 
-    set_draw_buffer(pb_EXAddr[buffer_index]&0x03FFFFFF);
+    set_draw_buffer(pb_EXAddr[buffer_index]&pb_MaxRAM);
 }
 
 DWORD pb_get_vbl_counter(void)
@@ -2326,7 +2327,7 @@ uint32_t *pb_push_transposed_matrix(uint32_t *p, DWORD command, float *m)
 
 void pb_show_front_screen(void)
 {
-    VIDEOREG(PCRTC_START)=pb_FBAddr[pb_front_index]&0x03FFFFFF;
+    VIDEOREG(PCRTC_START)=pb_FBAddr[pb_front_index]&pb_MaxRAM;
     pb_debug_screen_active=0;
 }
 
@@ -2720,6 +2721,14 @@ int pb_init(void)
 
     if (pb_running) return -8;
 
+    // Get the top of memory as reported by MCP
+    HalReadWritePCISpace(0, 0, 0x84, &pb_MaxRAM, sizeof(pb_MaxRAM), FALSE);
+
+    pb_MemoryTop = 0x03FFAFFF;
+    if (pb_MaxRAM > 0x03FFFFFF) {
+        pb_MemoryTop = 0x07FFAFFF;
+    }
+
     //reset global vars (except pb_Size)
 
     pb_3DGrCtxInst[0]=0;
@@ -2743,16 +2752,16 @@ int pb_init(void)
     pb_FrameBuffersAddr=0;
 
 
-    pb_DmaBuffer8=MmAllocateContiguousMemoryEx(32,0,MAXRAM,0,4);
-    pb_DmaBuffer2=MmAllocateContiguousMemoryEx(32,0,MAXRAM,0,4);
-    pb_DmaBuffer7=MmAllocateContiguousMemoryEx(32,0,MAXRAM,0,4);
+    pb_DmaBuffer8=MmAllocateContiguousMemoryEx(32,0,pb_MemoryTop,0,4);
+    pb_DmaBuffer2=MmAllocateContiguousMemoryEx(32,0,pb_MemoryTop,0,4);
+    pb_DmaBuffer7=MmAllocateContiguousMemoryEx(32,0,pb_MemoryTop,0,4);
         //NumberOfBytes,LowestAcceptableAddress,HighestAcceptableAddress,Alignment,ProtectionType
     if ((pb_DmaBuffer8==NULL)||(pb_DmaBuffer2==NULL)||(pb_DmaBuffer7==NULL)) return -2;
     memset(pb_DmaBuffer8,0,32);
     memset(pb_DmaBuffer2,0,32);
     memset(pb_DmaBuffer7,0,32);
 
-    pb_Head=MmAllocateContiguousMemoryEx(pb_Size+8*1024,0,MAXRAM,0,0x404);
+    pb_Head=MmAllocateContiguousMemoryEx(pb_Size+8*1024,0,pb_MemoryTop,0,0x404);
         //NumberOfBytes,LowestAcceptableAddress,HighestAcceptableAddress,Alignment OPTIONAL,ProtectionType
     if (pb_Head==NULL) return -3;
 
@@ -2793,7 +2802,7 @@ int pb_init(void)
     pb_OldMCInterrupt=VIDEOREG(NV_PMC_INTR_EN_0);
     pb_OldFBConfig0=VIDEOREG(NV_PFB_CFG0);
     pb_OldFBConfig1=VIDEOREG(NV_PFB_CFG1);
-    pb_OldVideoStart=((DWORD)XVideoGetFB())&0x03FFFFFF;
+    pb_OldVideoStart=((DWORD)XVideoGetFB())&pb_MaxRAM;
 
     VIDEOREG(NV_PBUS_PCI_NV_12)=NV_PBUS_PCI_NV_12_ROM_DECODE_DISABLED;
     VIDEOREG(NV_PBUS_PCI_NV_3)=NV_PBUS_PCI_NV_3_LATENCY_TIMER_248_CLOCKS;
@@ -3091,13 +3100,13 @@ int pb_init(void)
         pb_CpuFrequency=733.33f; //Mhz, theoretically
 
 
-    pb_create_dma_ctx(3,DMA_CLASS_3D,0,MAXRAM,&sDmaObject3);
-    pb_create_dma_ctx(5,DMA_CLASS_2,0,MAXRAM,&sDmaObject5);
-    pb_create_dma_ctx(4,DMA_CLASS_3,0,MAXRAM,&sDmaObject4);
+    pb_create_dma_ctx(3,DMA_CLASS_3D,0,pb_MemoryTop,&sDmaObject3);
+    pb_create_dma_ctx(5,DMA_CLASS_2,0,pb_MemoryTop,&sDmaObject5);
+    pb_create_dma_ctx(4,DMA_CLASS_3,0,pb_MemoryTop,&sDmaObject4);
 
-    pb_create_dma_ctx(9,DMA_CLASS_3D,0,MAXRAM,&sDmaObject9);
-    pb_create_dma_ctx(10,DMA_CLASS_3D,0,MAXRAM,&sDmaObject10);
-    pb_create_dma_ctx(11,DMA_CLASS_3D,0,MAXRAM,&sDmaObject11);
+    pb_create_dma_ctx(9,DMA_CLASS_3D,0,pb_MemoryTop,&sDmaObject9);
+    pb_create_dma_ctx(10,DMA_CLASS_3D,0,pb_MemoryTop,&sDmaObject10);
+    pb_create_dma_ctx(11,DMA_CLASS_3D,0,pb_MemoryTop,&sDmaObject11);
     pb_DmaChID9Inst=sDmaObject9.Inst;
     pb_DmaChID10Inst=sDmaObject10.Inst;
     pb_DmaChID11Inst=sDmaObject11.Inst;
@@ -3107,7 +3116,7 @@ int pb_init(void)
     //this one is damn important. memory address 0x80000000 acts as a trigger.
     pb_create_dma_ctx(12,DMA_CLASS_3D,0x80000000,0x10000000,&sDmaObject12);
     pb_create_dma_ctx(8,DMA_CLASS_3D,(DWORD)pb_DmaBuffer8,0x20,&sDmaObject8);
-    pb_create_dma_ctx(6,DMA_CLASS_2,0,MAXRAM,&sDmaObject6);
+    pb_create_dma_ctx(6,DMA_CLASS_2,0,pb_MemoryTop,&sDmaObject6);
 
     //we initialized channel 0 first, that will match graphic context 0
     pb_FifoChannelID=0;
@@ -3406,7 +3415,7 @@ int pb_init(void)
     //Huge alignment enforcement (16 Kb aligned!) for the global size
     FBSize=(FBSize+0x3FFF)&0xFFFFC000;
 
-    FBAddr=(DWORD)MmAllocateContiguousMemoryEx(FBSize,0,0x03FFB000,0x4000,0x404);
+    FBAddr=(DWORD)MmAllocateContiguousMemoryEx(FBSize,0,(pb_MemoryTop+0x1),0x4000,0x404);
         //NumberOfBytes,LowestAcceptableAddress,HighestAcceptableAddress,Alignment OPTIONAL,ProtectionType
 
     pb_FBGlobalSize=FBSize;
@@ -3439,7 +3448,7 @@ int pb_init(void)
     //very different values (will occur at the edges of projected triangles).
 
     pb_assign_tile( 0,              //int   tile_index,
-            pb_FrameBuffersAddr&0x03FFFFFF, //DWORD tile_addr,
+            pb_FrameBuffersAddr&pb_MaxRAM, //DWORD tile_addr,
             FBSize,             //DWORD tile_size,
             Pitch,              //DWORD tile_pitch,
             0,              //DWORD tile_z_start_tag,
@@ -3479,7 +3488,7 @@ int pb_init(void)
     //Huge alignment enforcement (16 Kb aligned!) for the global size
     DSSize=(DSSize+0x3FFF)&0xFFFFC000;
 
-    DSAddr=(DWORD)MmAllocateContiguousMemoryEx(DSSize,0,0x03FFB000,0x4000,0x404);
+    DSAddr=(DWORD)MmAllocateContiguousMemoryEx(DSSize,0,(pb_MemoryTop+0x1),0x4000,0x404);
         //NumberOfBytes,LowestAcceptableAddress,HighestAcceptableAddress,Alignment OPTIONAL,ProtectionType
 
     pb_DepthStencilAddr=DSAddr;
@@ -3492,7 +3501,7 @@ int pb_init(void)
     pb_DSAddr=DSAddr;
 
     pb_assign_tile( 1,              //int   tile_index,
-            pb_DepthStencilAddr&0x03FFFFFF, //DWORD tile_addr,
+            pb_DepthStencilAddr&pb_MaxRAM, //DWORD tile_addr,
             DSSize,             //DWORD tile_size,
             Pitch,              //DWORD tile_pitch,
             0,              //DWORD tile_z_start_tag,
@@ -3531,7 +3540,7 @@ int pb_init(void)
         //Huge alignment enforcement (16 Kb aligned!) for the global size
         EXSize=(EXSize+0x3FFF)&0xFFFFC000;
 
-        EXAddr=(DWORD)MmAllocateContiguousMemoryEx(EXSize,0,0x03FFB000,0x4000,0x404);
+        EXAddr=(DWORD)MmAllocateContiguousMemoryEx(EXSize,0,(pb_MemoryTop+1),0x4000,0x404);
         //NumberOfBytes,LowestAcceptableAddress,HighestAcceptableAddress,Alignment OPTIONAL,ProtectionType
 
         if (!EXAddr)
@@ -3547,7 +3556,7 @@ int pb_init(void)
         }
 
         pb_assign_tile( 2,              //int   tile_index,
-                pb_EXAddr[0]&0x03FFFFFF,    //DWORD tile_addr,
+                pb_EXAddr[0]&pb_MaxRAM,    //DWORD tile_addr,
                 EXSize,             //DWORD tile_size,
                 Pitch,              //DWORD tile_pitch,
                 0,              //DWORD tile_z_start_tag,
